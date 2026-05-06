@@ -6,14 +6,53 @@ class KeyWindow: NSWindow {
     override var canBecomeMain: Bool { true }
 }
 
+class HoverButton: NSButton {
+    override func mouseEntered(with event: NSEvent) {
+        // apply hover ONLY if not selected
+        if self.state == .off {
+            self.layer?.borderColor = NSColor.systemBlue.cgColor
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        // reset ONLY if not selected
+        if self.state == .off {
+            self.layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+    }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
     
     var window: NSWindow!
     var questions: [[String: Any]] = []
-    var answerFields: [String: NSTextField] = [:]
+    var answerFields: [String: [NSButton]] = [:]
+    var submitButton: NSButton?
+    var isSubmitting = false
+    var modalView: NSView!
     private var modalHeightConstraint: NSLayoutConstraint!
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            
+            // ❌ Block CMD + Q
+            if event.modifierFlags.contains(.command) && event.characters == "q" {
+                return nil
+            }
+            
+            // ❌ Block ESC
+            if event.keyCode == 53 {
+                return nil
+            }
+            
+            // ✅ ADMIN shortcut (CTRL + SHIFT + A)
+            if event.modifierFlags.contains([.control, .shift]) && event.characters == "a" {
+                self.showAdminDialog()
+                return nil
+            }
+            
+            return event
+        }
         // Wait a bit for UI session to be ready (Important)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
             NSApp.activate(ignoringOtherApps: true)
@@ -35,6 +74,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
         window.level = .screenSaver
         //window.acceptMouseMovedEvents = true
+        window.appearance = nil // follow system automatically
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         window.isOpaque = false
         window.backgroundColor = .clear
@@ -49,95 +89,113 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         blurView.autoresizingMask = [.width, .height]
 
         // Modal
-        let modalView = NSView()
+        modalView = NSView()
         modalView.wantsLayer = true
-        modalView.layer?.backgroundColor = NSColor.white.cgColor
+        modalView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
         modalView.layer?.cornerRadius = 16
         modalView.translatesAutoresizingMaskIntoConstraints = false
         
         blurView.addSubview(modalView)
         
-        modalHeightConstraint = modalView.heightAnchor.constraint(equalToConstant: 250)
-        modalHeightConstraint.isActive = true
-        
         NSLayoutConstraint.activate([
             modalView.centerXAnchor.constraint(equalTo: blurView.centerXAnchor),
             modalView.centerYAnchor.constraint(equalTo: blurView.centerYAnchor),
-            modalView.widthAnchor.constraint(equalToConstant: 400)
+            modalView.widthAnchor.constraint(lessThanOrEqualToConstant: 700),
+            modalView.widthAnchor.constraint(greaterThanOrEqualToConstant: 400)
         ])
         
-        // Keep Frame Based (Stable)
-        let contentView = NSView(frame: NSRect(x: 20, y: 20, width: 360, height: 200))
-        modalView.addSubview(contentView)
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.spacing = 12
+        stack.alignment = .centerX
+        stack.distribution = .gravityAreas
+        stack.translatesAutoresizingMaskIntoConstraints = false
         
-        /*var yPosition: CGFloat = 180
-        
-        for i in 1...3 {
-            let label = NSTextField(labelWithString: "Question \(i)")
-            label.frame = NSRect(x: 0, y: yPosition, width: 340, height: 20)
-            label.textColor = .black
-            
-            let input = NSTextField(frame: NSRect(x: 0, y: yPosition, width: 340, height: 24))
-            
-            contentView.addSubview(label)
-            contentView.addSubview(input)
-            
-            yPosition -= 70
-        }*/
-
-        //let exitButton = NSButton(title: "Exit (dev)", target: self, action: #selector(forceExit))
-        /*
-        let scrollView = NSScrollView()
-        scrollView.translatesAutoresizingMaskIntoConstraints = false
-        scrollView.hasVerticalScroller = true
-        
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: 300, height: 300))
-        
-        let stackView = NSStackView(frame: contentView.bounds)
-        stackView.orientation = .vertical
-        stackView.spacing = 12
-       
-        contentView.addSubview(stackView)
-        scrollView.documentView = contentView
-        modalView.addSubview(scrollView)
+        modalView.addSubview(stack)
         
         NSLayoutConstraint.activate([
-            // ScrollView
-            scrollView.topAnchor.constraint(equalTo: modalView.topAnchor, constant: 20),
-            scrollView.leadingAnchor.constraint(equalTo: modalView.leadingAnchor, constant: 20),
-            scrollView.trailingAnchor.constraint(equalTo: modalView.trailingAnchor, constant: -20),
-            scrollView.heightAnchor.constraint(equalToConstant: 200)
+            stack.centerXAnchor.constraint(equalTo: modalView.centerXAnchor),
+            stack.centerYAnchor.constraint(equalTo: modalView.centerYAnchor),
+            stack.widthAnchor.constraint(lessThanOrEqualToConstant: 600),
+            stack.topAnchor.constraint(equalTo: modalView.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: modalView.bottomAnchor, constant: -20),
+            stack.leadingAnchor.constraint(equalTo: modalView.leadingAnchor, constant: 20),
+            stack.trailingAnchor.constraint(equalTo: modalView.trailingAnchor, constant: -20)
         ])
         
-        stackView.layoutSubtreeIfNeeded()
-        contentView.frame.size.height = stackView.fittingSize.height
-         
-        let button = NSButton(title: "Submit", target: self, action: #selector(submit))
-        button.frame = NSRect(x: 150, y: 40, width: 100, height: 40)
-        button.bezelStyle = NSButton.BezelStyle.rounded
-        button.wantsLayer = true
-        button.layer?.backgroundColor = NSColor.systemBlue.cgColor
-        button.layer?.cornerRadius = 8
-        button.layer?.masksToBounds = true
-        button.contentTintColor = .white
-        button.translatesAutoresizingMaskIntoConstraints = false
-
-        modalView.addSubview(button)
-        
-            // Auto Layout
-        NSLayoutConstraint.activate([
-            button.bottomAnchor.constraint(equalTo: modalView.bottomAnchor, constant: -20),
-            button.centerXAnchor.constraint(equalTo: modalView.centerXAnchor),
-            button.topAnchor.constraint(equalTo: stackView.bottomAnchor, constant: 20)
-        ])
-        */
         window.contentView = blurView
         window.makeKeyAndOrderFront(nil)
         
-        loadQuestions(contentView: contentView)
+        /*let loadingLabel = NSTextField(labelWithString: "Loading...")
+        loadingLabel.font = NSFont.systemFont(ofSize: 20, weight: .medium)
+        loadingLabel.textColor = NSColor.labelColor
+        loadingLabel.alignment = .center
+        
+        loadingLabel.setContentHuggingPriority(.required, for: .vertical)
+        loadingLabel.setContentCompressionResistancePriority(.required, for: .vertical)
+        
+        stack.addArrangedSubview(loadingLabel)*/
+        
+        let spinner = NSProgressIndicator()
+        spinner.style = .spinning
+        spinner.controlSize = .regular
+        spinner.startAnimation(nil)
+
+        // center nicely
+        spinner.setContentHuggingPriority(.required, for: .vertical)
+        spinner.setContentCompressionResistancePriority(.required, for: .vertical)
+
+        stack.addArrangedSubview(spinner)
+        
+        let loadingText = NSTextField(labelWithString: "Loading...")
+        loadingText.textColor = .secondaryLabelColor
+        loadingText.alignment = .center
+
+        stack.addArrangedSubview(loadingText)
+        
+        self.window.layoutIfNeeded()
+        self.window.displayIfNeeded()
+        
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            self.loadQuestions(stack: stack)
+        }
+        
+        NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            
+            if event.modifierFlags.contains([.command, .shift]) && event.characters == "a" {
+                self.showAdminDialog()
+                return nil
+            }
+            return event
+        }
     }
     
-    func loadQuestions(contentView: NSView) {
+    func showAdminDialog() {
+        let alert = NSAlert()
+        alert.messageText = "Admin Access"
+        alert.informativeText = "Enter password to exit"
+        alert.alertStyle = .warning
+        
+        let passwordField = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 200, height: 24))
+        alert.accessoryView = passwordField
+        
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Cancel")
+        
+        // ✅ Attach to your main window
+        alert.beginSheetModal(for: self.window) { response in
+            if response == .alertFirstButtonReturn {
+                if passwordField.stringValue == "_+inTERnal" {
+                    self.actuallyCloseApp()
+                } else {
+                    self.showAlert(message: "Invalid password")
+                }
+            }
+        }
+    }
+    
+    func loadQuestions(stack: NSStackView) {
+        
         guard let url = URL(string: "https://script.google.com/macros/s/AKfycbygRIt1-Z2Ppvo8GTGFx28ktI8nhHK1eFkB99cp0LQReSV86gR8YZtnMNhn6xa3dD7d/exec") else { return }
 
         URLSession.shared.dataTask(with: url) { data, _, _ in
@@ -147,80 +205,162 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 
                 DispatchQueue.main.async {
                     
+                    stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+                    
                     guard let randomQ = json.randomElement() else { return }
                     
                     let id = "\(randomQ["id"] ?? "")"
                     let text = "\(randomQ["question"] ?? "")"
                     
-                    // clear old views ( important if reused)
-                    contentView.subviews.forEach{ $0.removeFromSuperview() }
-                    
-                    // create label first - flexible
+                    // create Question label first - flexible
                     let label = NSTextField(labelWithString: text)
-                    label.frame = NSRect(x: 0, y: 150, width: 340, height: 20)
-                    label.textColor = .black
+                    label.font = NSFont.systemFont(ofSize: 16, weight: .medium)
+                    label.textColor = NSColor.labelColor
+                    label.drawsBackground = false
                     label.lineBreakMode = .byWordWrapping
                     label.maximumNumberOfLines = 0
-                    label.preferredMaxLayoutWidth = 340
+                    label.alignment = .center
                     
-                    // Auto Calculate height
-                    let requiredHeight = label.fittingSize.height
-                    label.frame.size.height = requiredHeight
+                    label.setContentHuggingPriority(.required, for: .vertical)
                     
-                    contentView.addSubview(label)
+                    stack.addArrangedSubview(label)
                     
-                    // Input position Dynamically
-                    let inputY = 150 - requiredHeight - 30
+                    // Options
+                    let options = [
+                        "Strongly Disagree",
+                        "Disagree",
+                        "Moderate",
+                        "Agree",
+                        "Strongly Agree"
+                    ]
                     
-                    let input = NSTextField(frame: NSRect(x: 0, y: inputY, width: 340, height: 28))
-                    input.isBezeled = true
-                    input.bezelStyle = .roundedBezel
-                    //input.isBordered = true
-                    input.drawsBackground = true
-                    input.backgroundColor = .white
-                    input.textColor = .black
-                    //input.focusRingType = .default
-                    input.isEditable = true
-                    input.isSelectable = true
-                    input.isEnabled = true
+                    let buttonStack = NSStackView()
+                    buttonStack.orientation = .horizontal
+                    buttonStack.spacing = 10
+                    buttonStack.alignment = .centerY
+                    buttonStack.distribution = .fillProportionally
+                    buttonStack.translatesAutoresizingMaskIntoConstraints = false
                     
-                    contentView.addSubview(input)
-                    self.answerFields[id] = input
+                    buttonStack.setContentHuggingPriority(.required, for: .vertical)
+                    buttonStack.setContentCompressionResistancePriority(.required, for: .vertical)
+                    
+                    var buttons: [NSButton] = []
+                    
+                    for option in options {
+
+                        let btn = HoverButton(title: option, target: self, action: #selector(self.radioSelected(_:)))
+                        
+                        btn.setButtonType(.toggle)
+                        btn.bezelStyle = .regularSquare
+                        btn.translatesAutoresizingMaskIntoConstraints = false
+                        
+                        btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
+                        
+                        btn.setContentHuggingPriority(.required, for: .horizontal)
+                        
+                        // Style like card
+                        btn.wantsLayer = true
+                        btn.layer?.cornerRadius = 8
+                        btn.layer?.borderWidth = 1
+                        btn.layer?.borderColor = NSColor.separatorColor.cgColor
+                        btn.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+                        btn.contentTintColor = NSColor.labelColor
+                        btn.addCursorRect(btn.bounds, cursor: .pointingHand)
+                        
+                        buttonStack.addArrangedSubview(btn)
+                        buttons.append(btn)
+                        
+                        btn.addTrackingArea(NSTrackingArea(
+                            rect: btn.bounds,
+                            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                            owner: btn,
+                            userInfo: nil
+                        ))
+                    }
+                    
+                    let container = NSView()
+                    container.translatesAutoresizingMaskIntoConstraints = false
+                    
+                    container.addSubview(buttonStack)
+                    
+                    NSLayoutConstraint.activate([
+                        buttonStack.topAnchor.constraint(equalTo: container.topAnchor),
+                        buttonStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                        buttonStack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+                        buttonStack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+                    ])
+                    
+                    stack.addArrangedSubview(container)
+                    
+                    // Store buttons instead of textfield
+                    self.answerFields[id] = buttons
                     
                     // Submit Button
-                    let submitButton = NSButton(frame: NSRect(x: 120, y: 20, width: 120, height: 32))
-                    submitButton.title = "Submit"
+                    let submitButton = NSButton(title: "Submit", target: self, action: #selector(self.submit))
+                    submitButton.translatesAutoresizingMaskIntoConstraints = false
                     submitButton.bezelStyle = .rounded
-                    submitButton.target = self
-                    submitButton.action = #selector(self.submit)
+                    submitButton.contentTintColor = NSColor.controlTextColor
+                    submitButton.wantsLayer = true
+                    submitButton.widthAnchor.constraint(equalToConstant: 120).isActive = true
+                    submitButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
                     
-                    contentView.addSubview(submitButton)
+                    stack.addArrangedSubview(submitButton)
+                    self.submitButton = submitButton
                     
-                    // modal size stable
-                    self.modalHeightConstraint.constant =  250
+                    self.modalView.alphaValue = 0
+                    
+                    // Fade in after everything is ready
+                    NSAnimationContext.runAnimationGroup({ ctx in
+                        ctx.duration = 0.3
+                        self.modalView.alphaValue = 1
+                    }, completionHandler: nil)
                     
                     // force typing focus
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
                         NSApp.activate(ignoringOtherApps: true)
                         self.window.makeKeyAndOrderFront(nil)
-                        self.window.makeFirstResponder(input)
                     }
                 }
             }
         }.resume()
     }
+    
+    @objc func radioSelected(_ sender: NSButton) {
+        guard let (_, buttons) = answerFields.first else { return }
+        
+        for btn in buttons {
+            // reset all buttons
+            btn.state = .off
+            btn.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+            btn.contentTintColor = NSColor.labelColor
+            btn.layer?.borderColor = NSColor.separatorColor.cgColor
+        }
+        
+        // apply only to selected
+        sender.state = .on
+        sender.layer?.backgroundColor = NSColor.systemBlue.cgColor
+        sender.layer?.borderColor = NSColor.systemBlue.cgColor
+        sender.contentTintColor = .white
+    }
 
     @objc func submit() {
-        print("clicked submit")
+        if isSubmitting { return } // prevent multiple clicks
         
-        guard let (id, field) = answerFields.first else { return }
+        guard let (id, buttons) = answerFields.first else { return }
         
-        let answer = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        let selected = buttons.first { $0.state == NSControl.StateValue.on }
         
-        if answer.isEmpty {
-            showAlert(message: "Please answer the question before submitting.")
+        guard let selectedBtn = selected else {
+            showAlert(message: "Please select an option before submitting")
             return
         }
+        
+        isSubmitting = true
+        
+        submitButton?.isEnabled = false
+        submitButton?.title = "Submitting..."
+        
+        let answer = selectedBtn.title
         
         let payload: [String: Any] = [
             "device_serial": Host.current().localizedName ?? "mac",
@@ -245,9 +385,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async {
                 if error != nil {
                     self.showAlert(message: "Failed to submit. Try agian.")
+                    self.isSubmitting = false
+                    self.submitButton?.isEnabled = true
+                    self.submitButton?.title = "Submit"
                     return
                 }
-                print("Response saved")
+                
+                self.submitButton?.title = "Submitted"
                 self.actuallyCloseApp()
             }
         }
