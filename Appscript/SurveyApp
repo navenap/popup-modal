@@ -1,0 +1,104 @@
+function doGet(e) {
+
+  const deviceSerial = e.parameter.device_serial;
+
+  Logger.log("DEVICE: " + deviceSerial);
+
+  const qSheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName("questions");
+
+  const rSheet =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSheetByName("responses");
+
+  const qData = qSheet.getDataRange().getValues();
+  const rData = rSheet.getDataRange().getValues();
+
+  Logger.log(JSON.stringify(qData));
+
+  const qHeaders = qData[0];
+
+  Logger.log(JSON.stringify(qHeaders));
+
+  const qRows = qData.slice(1);
+  const rRows = rData.slice(1);
+
+  const answeredIds = new Set();
+
+  rRows.forEach(row => {
+
+    const device = row[1];
+    const questionId = row[3];
+
+    if (device === deviceSerial) {
+      answeredIds.add(String(questionId));
+    }
+  });
+
+  Logger.log("ANSWERED IDS");
+  Logger.log(JSON.stringify([...answeredIds]));
+
+  const result = qRows
+    .map(row => {
+
+      let obj = {};
+
+      qHeaders.forEach((h, i) => {
+        obj[h] = row[i];
+      });
+
+      return obj;
+    })
+    .filter(q => !answeredIds.has(String(q.id)));
+
+  Logger.log("RESULT");
+  Logger.log(JSON.stringify(result));
+
+  return ContentService
+    .createTextOutput(JSON.stringify(result))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+function doPost(e) {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName("responses");
+  const data = JSON.parse(e.postData.contents);
+
+  if (!data.answers || data.answers.length === 0) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ status: "error", message: "No answers provided" }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const existing = sheet.getDataRange().getValues();
+
+  const rowsToInsert = [];
+  const timestamp = new Date();
+
+  data.answers.forEach(ans => {
+    const alreadyAnswered = existing.some(row =>
+      row[1] === data.device_serial && row[3] == ans.question_id
+    );
+
+    if (!alreadyAnswered) {
+      rowsToInsert.push([
+        timestamp,
+        data.device_serial,
+        data.username,
+        ans.question_id,
+        ans.answer
+      ]);
+    }
+  });
+
+  if (rowsToInsert.length > 0) {
+    sheet.getRange(sheet.getLastRow() + 1, 1, rowsToInsert.length, rowsToInsert[0].length)
+         .setValues(rowsToInsert);
+  }
+
+  return ContentService
+    .createTextOutput(JSON.stringify({ status: "success" }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
