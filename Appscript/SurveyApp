@@ -2,46 +2,69 @@ function doGet(e) {
 
   const deviceSerial = e.parameter.device_serial;
 
-  Logger.log("DEVICE: " + deviceSerial);
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
 
-  const qSheet =
-    SpreadsheetApp
-      .getActiveSpreadsheet()
-      .getSheetByName("questions");
+  const userSheet = ss.getSheetByName("users");
+  const qSheet = ss.getSheetByName("questions");
+  const rSheet = ss.getSheetByName("responses");
 
-  const rSheet =
-    SpreadsheetApp
-      .getActiveSpreadsheet()
-      .getSheetByName("responses");
-
+  const userData = userSheet.getDataRange().getValues();
   const qData = qSheet.getDataRange().getValues();
   const rData = rSheet.getDataRange().getValues();
 
-  Logger.log(JSON.stringify(qData));
-
+  const userHeaders = userData[0];
   const qHeaders = qData[0];
 
-  Logger.log(JSON.stringify(qHeaders));
+  const users = userData.slice(1);
+  const questions = qData.slice(1);
+  const responses = rData.slice(1);
 
-  const qRows = qData.slice(1);
-  const rRows = rData.slice(1);
+  // FIND USER
+  let user = null;
 
+  for (let row of users) {
+
+    const serial = row[2];
+
+    if (String(serial).trim() === String(deviceSerial).trim()) {
+
+      user = {
+        email: row[0],
+        manufacturer: row[1],
+        serial: row[2],
+        group: row[3]
+      };
+
+      break;
+    }
+  }
+
+  if (!user) {
+
+    return ContentService
+      .createTextOutput(JSON.stringify({
+        status: "error",
+        message: "User not found"
+      }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  // ANSWERED QUESTIONS
   const answeredIds = new Set();
 
-  rRows.forEach(row => {
+  responses.forEach(row => {
 
-    const device = row[1];
-    const questionId = row[3];
+    const serial = row[1];
+    const qid = row[3];
 
-    if (device === deviceSerial) {
-      answeredIds.add(String(questionId));
+    if (String(serial) === String(deviceSerial)) {
+
+      answeredIds.add(String(qid));
     }
   });
 
-  Logger.log("ANSWERED IDS");
-  Logger.log(JSON.stringify([...answeredIds]));
-
-  const result = qRows
+  // FILTER QUESTIONS BY GROUP
+  const result = questions
     .map(row => {
 
       let obj = {};
@@ -52,10 +75,16 @@ function doGet(e) {
 
       return obj;
     })
-    .filter(q => !answeredIds.has(String(q.id)));
-
-  Logger.log("RESULT");
-  Logger.log(JSON.stringify(result));
+    .filter(q =>
+      q.group === user.group &&
+      !answeredIds.has(String(q.id))
+    )
+    .map(q => ({
+      id: q.id,
+      question: q.question,
+      type: q.type,
+      options: String(q.options).split(",")
+    }));
 
   return ContentService
     .createTextOutput(JSON.stringify(result))
