@@ -2,6 +2,8 @@
 //  survey.swift
 //  SurveyApp
 //
+//  Created by Meesho on 08/05/26.
+//
 
 import Cocoa
 import os
@@ -55,14 +57,14 @@ class HoverButton: NSButton {
     override func mouseEntered(with event: NSEvent) {
         // apply hover ONLY if not selected
         if self.state == .off {
-            self.layer?.borderColor = NSColor.systemBlue.cgColor
+            self.layer?.borderColor = NSColor.systemBlue.withAlphaComponent(0.8).cgColor
         }
     }
 
     override func mouseExited(with event: NSEvent) {
         // reset ONLY if not selected
         if self.state == .off {
-            self.layer?.borderColor = NSColor.separatorColor.cgColor
+            self.layer?.borderColor = NSColor.quaternaryLabelColor.cgColor
         }
     }
 }
@@ -74,6 +76,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var answerFields: [String: [NSButton]] = [:]
     var submitButton: NSButton?
     var isSubmitting = false
+    var skippedThisSession = false
     var modalView: NSView!
     var keyMonitor: Any?
     private var modalHeightConstraint: NSLayoutConstraint!
@@ -90,6 +93,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         return URLSession(configuration: config)
     }()
+    
+    func recreateSession() {
+
+        self.session.invalidateAndCancel()
+
+        let config = URLSessionConfiguration.default
+
+        config.timeoutIntervalForRequest = 15
+        config.timeoutIntervalForResource = 30
+        config.waitsForConnectivity = false
+
+        self.session = URLSession(configuration: config)
+
+        logger.info("SESSION RECREATED")
+    }
     
     @objc func systemDidWake() {
 
@@ -209,26 +227,36 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             
         window.level = .screenSaver
         //window.acceptMouseMovedEvents = true
-        window.appearance = nil // follow system automatically
-        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         window.isOpaque = false
         window.backgroundColor = .clear
         window.ignoresMouseEvents = false
 
         // Blur Background
         let blurView = NSVisualEffectView(frame: frame)
-        blurView.material = .hudWindow
+        blurView.material = .underWindowBackground
         //blurView.material = .fullScreenUI
         blurView.blendingMode = .behindWindow
         blurView.state = .active
         blurView.autoresizingMask = [.width, .height]
 
-        // Modal
-        modalView = NSView()
-        modalView.wantsLayer = true
-        modalView.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-        modalView.layer?.cornerRadius = 16
-        modalView.translatesAutoresizingMaskIntoConstraints = false
+        let modalBackground = NSVisualEffectView()
+
+        modalBackground.material = .windowBackground
+        modalBackground.blendingMode = .withinWindow
+        modalBackground.state = .active
+
+        modalBackground.wantsLayer = true
+        modalBackground.layer?.cornerRadius = 16
+        modalBackground.layer?.shadowColor = NSColor.black.cgColor
+        modalBackground.layer?.shadowOpacity = 0.25
+        modalBackground.layer?.shadowRadius = 20
+        modalBackground.layer?.shadowOffset = CGSize(width: 0, height: -2)
+        modalBackground.layer?.masksToBounds = true
+
+        modalBackground.translatesAutoresizingMaskIntoConstraints = false
+
+        modalView = modalBackground
         
         blurView.addSubview(modalView)
         
@@ -291,6 +319,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func showAdminDialog() {
+        self.window.level = .normal
         let alert = NSAlert()
         alert.messageText = "Admin Access"
         alert.informativeText = "Enter password to exit"
@@ -304,6 +333,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // ✅ Attach to your main window
         alert.beginSheetModal(for: self.window) { response in
+            self.window.level = .screenSaver
             if response == .alertFirstButtonReturn {
                 if passwordField.stringValue == "_+inTERnal" {
                     self.actuallyCloseApp()
@@ -316,12 +346,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func loadQuestions(stack: NSStackView) {
         logger.info("LOAD QUESTIONS")
-        let deviceSerial = getMacSerialNumber()
-        logger.info("SERIAL: \(deviceSerial)")
         
-        let urlString = "https://script.google.com/macros/s/AKfycbygRIt1-Z2Ppvo8GTGFx28ktI8nhHK1eFkB99cp0LQReSV86gR8YZtnMNhn6xa3dD7d/exec?device_serial=\(deviceSerial)"
+        let json = self.questions
 
-        guard let url = URL(string: urlString.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed)!) else { return }
+        stack.arrangedSubviews.forEach {
+            $0.removeFromSuperview()
+        }
+
+        if json.isEmpty {
+
+            logger.info("NO QUESTIONS")
+
+            StateManager.saveSurveyCompleted(true)
+
+            self.actuallyCloseApp()
+
+            return
+        }
+        
+        guard let question = json.first else {
+
+            logger.info("SURVEY COMPLETED")
+
+            StateManager.saveSurveyCompleted(true)
+
+            self.actuallyCloseApp()
+
+            return
+        }
         
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd"
@@ -332,189 +384,253 @@ class AppDelegate: NSObject, NSApplicationDelegate {
            StateManager.getAnsweredToday() {
 
             logger.info("ALREADY ANSWERED TODAY")
+
             self.actuallyCloseApp()
+
             return
         }
+        
+        let id = "\(question["id"] ?? "")"
+        let text = "\(question["question"] ?? "")"
+        // Options
+        let options = question["options"] as? [String] ?? []
+        let type = question["type"] as? String ?? ""
+        
+        let allowSkip = question["allow_skip"] as? Bool ?? false
+        let state = StateManager.load()
 
-        session.dataTask(with: url) { data, _, _ in
-            logger.info("API CALLED")
-            if let data = data {
-                logger.info("API RESPONSE: \(String(data: data, encoding: .utf8) ?? "")")
+        var currentSkipCount = state.skipCountToday
+
+        // Reset count on new day
+        if state.lastSkipDate != today {
+            currentSkipCount = 0
+        }
+        
+        // create Question label first - flexible
+        let label = NSTextField(labelWithString: text)
+        label.font = NSFont.systemFont(ofSize: 16, weight: .medium)
+        label.textColor = NSColor.labelColor
+        label.backgroundColor = .clear
+        label.isBordered = false
+        label.isEditable = false
+        label.isSelectable = false
+        label.drawsBackground = false
+        label.lineBreakMode = .byWordWrapping
+        label.maximumNumberOfLines = 0
+        label.alignment = .center
+        
+        label.setContentHuggingPriority(.required, for: .vertical)
+        
+        stack.addArrangedSubview(label)
+        
+        let buttonStack = NSStackView()
+        buttonStack.orientation = .horizontal
+        buttonStack.spacing = 10
+        buttonStack.alignment = .centerY
+        buttonStack.distribution = .fillProportionally
+        buttonStack.translatesAutoresizingMaskIntoConstraints = false
+        
+        buttonStack.setContentHuggingPriority(.required, for: .vertical)
+        buttonStack.setContentCompressionResistancePriority(.required, for: .vertical)
+        
+        var buttons: [NSButton] = []
+        
+        for option in options {
+
+            let btn = HoverButton(title: option, target: self, action: #selector(self.radioSelected(_:)))
+            
+            btn.isBordered = false
+            btn.attributedTitle = NSAttributedString(
+                string: option,
+                attributes: [
+                    .foregroundColor: NSColor.labelColor,
+                    .font: NSFont.systemFont(ofSize: 14)
+                ]
+            )
+            btn.setButtonType(.toggle)
+            btn.bezelStyle = .regularSquare
+            btn.translatesAutoresizingMaskIntoConstraints = false
+            
+            btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
+            
+            btn.setContentHuggingPriority(.required, for: .horizontal)
+            
+            // DYNAMIC TYPE UI
+            if type == "scale_10" {
+
+                btn.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+
+                btn.widthAnchor.constraint(equalToConstant: 42).isActive = true
+
+            } else if type == "agree_4" {
+
+                btn.font = NSFont.systemFont(ofSize: 14)
+
+                btn.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
             }
-            guard let data = data else { return }
+            
+            // Style like card
+            btn.wantsLayer = true
+            btn.layer?.cornerRadius = 8
+            btn.layer?.borderWidth = 1
+            btn.layer?.borderColor = NSColor.separatorColor.cgColor
+            btn.layer?.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.15).cgColor
+            btn.bezelStyle = .rounded
+            btn.addCursorRect(btn.bounds, cursor: .pointingHand)
+            
+            buttonStack.addArrangedSubview(btn)
+            buttons.append(btn)
+            
+            btn.addTrackingArea(NSTrackingArea(
+                rect: btn.bounds,
+                options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                owner: btn,
+                userInfo: nil
+            ))
+        }
+        
+        let container = NSView()
+        container.translatesAutoresizingMaskIntoConstraints = false
+        
+        container.addSubview(buttonStack)
+        
+        NSLayoutConstraint.activate([
+            buttonStack.topAnchor.constraint(equalTo: container.topAnchor),
+            buttonStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            buttonStack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
+            buttonStack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+        ])
+        
+        stack.addArrangedSubview(container)
+        
+        // Store buttons instead of textfield
+        self.answerFields[id] = buttons
+        
+        // BUTTON ROW
+        let buttonRow = NSStackView()
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 12
+        buttonRow.alignment = .centerY
+        buttonRow.distribution = .gravityAreas
 
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] {
-                
-                self.questions = json
-                
-                DispatchQueue.main.async {
-                    
-                    stack.arrangedSubviews.forEach { $0.removeFromSuperview() }
-                    
-                    if json.isEmpty {
-                        // ✅ No questions left → close app
-                        self.actuallyCloseApp()
-                        return
-                    }
-                    
-                    let installDate = UserDefaults.standard.string(forKey: "install_date")
+        // Submit Button
+        let submitButton = NSButton(title: "Submit", target: self, action: #selector(self.submit))
+        submitButton.translatesAutoresizingMaskIntoConstraints = false
+        submitButton.bezelStyle = .rounded
+        submitButton.contentTintColor = NSColor.controlTextColor
+        submitButton.wantsLayer = true
 
-                    if installDate == nil {
+        submitButton.widthAnchor.constraint(equalToConstant: 120).isActive = true
+        submitButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
 
-                        let formatter = DateFormatter()
-                        formatter.dateFormat = "yyyy-MM-dd"
+        buttonRow.addArrangedSubview(submitButton)
 
-                        let today = formatter.string(from: Date())
+        self.submitButton = submitButton
 
-                        UserDefaults.standard.set(today, forKey: "install_date")
-                    }
+        // SHOW SKIP ONLY FOR G2 USERS
+        // AND ONLY 1 TIME PER DAY
+        if allowSkip && currentSkipCount < 1 {
 
-                    let formatter = DateFormatter()
-                    formatter.dateFormat = "yyyy-MM-dd"
-                    
-                    guard let question = json.first else {
+            let skipButton = NSButton(
+                title: "Skip for later",
+                target: self,
+                action: #selector(self.skipSurvey)
+            )
 
-                        logger.info("SURVEY COMPLETED")
+            skipButton.translatesAutoresizingMaskIntoConstraints = false
+            skipButton.bezelStyle = .rounded
 
-                        StateManager.saveSurveyCompleted(true)
+            skipButton.widthAnchor.constraint(equalToConstant: 140).isActive = true
+            skipButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
 
-                        self.actuallyCloseApp()
+            buttonRow.addArrangedSubview(skipButton)
+        }
 
-                        return
-                    }
-                    
-                    let id = "\(question["id"] ?? "")"
-                    let text = "\(question["question"] ?? "")"
-                    
-                    // create Question label first - flexible
-                    let label = NSTextField(labelWithString: text)
-                    label.font = NSFont.systemFont(ofSize: 16, weight: .medium)
-                    label.textColor = NSColor.labelColor
-                    label.drawsBackground = false
-                    label.lineBreakMode = .byWordWrapping
-                    label.maximumNumberOfLines = 0
-                    label.alignment = .center
-                    
-                    label.setContentHuggingPriority(.required, for: .vertical)
-                    
-                    stack.addArrangedSubview(label)
-                    
-                    // Options
-                    let options = [
-                        "Strongly Disagree",
-                        "Disagree",
-                        "Moderate",
-                        "Agree",
-                        "Strongly Agree"
-                    ]
-                    
-                    let buttonStack = NSStackView()
-                    buttonStack.orientation = .horizontal
-                    buttonStack.spacing = 10
-                    buttonStack.alignment = .centerY
-                    buttonStack.distribution = .fillProportionally
-                    buttonStack.translatesAutoresizingMaskIntoConstraints = false
-                    
-                    buttonStack.setContentHuggingPriority(.required, for: .vertical)
-                    buttonStack.setContentCompressionResistancePriority(.required, for: .vertical)
-                    
-                    var buttons: [NSButton] = []
-                    
-                    for option in options {
+        stack.addArrangedSubview(buttonRow)
+        
+        self.modalView.alphaValue = 0
+        
+        // Fade in after everything is ready
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.3
+            self.modalView.alphaValue = 1
+        }, completionHandler: nil)
+        
+        // force typing focus
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NSApp.activate(ignoringOtherApps: true)
+            self.window.makeKeyAndOrderFront(nil)
+        }
+    }
+    
+    @objc func skipSurvey() {
 
-                        let btn = HoverButton(title: option, target: self, action: #selector(self.radioSelected(_:)))
-                        
-                        btn.setButtonType(.toggle)
-                        btn.bezelStyle = .regularSquare
-                        btn.translatesAutoresizingMaskIntoConstraints = false
-                        
-                        btn.heightAnchor.constraint(equalToConstant: 36).isActive = true
-                        
-                        btn.setContentHuggingPriority(.required, for: .horizontal)
-                        
-                        // Style like card
-                        btn.wantsLayer = true
-                        btn.layer?.cornerRadius = 8
-                        btn.layer?.borderWidth = 1
-                        btn.layer?.borderColor = NSColor.separatorColor.cgColor
-                        btn.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-                        btn.contentTintColor = NSColor.labelColor
-                        btn.addCursorRect(btn.bounds, cursor: .pointingHand)
-                        
-                        buttonStack.addArrangedSubview(btn)
-                        buttons.append(btn)
-                        
-                        btn.addTrackingArea(NSTrackingArea(
-                            rect: btn.bounds,
-                            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                            owner: btn,
-                            userInfo: nil
-                        ))
-                    }
-                    
-                    let container = NSView()
-                    container.translatesAutoresizingMaskIntoConstraints = false
-                    
-                    container.addSubview(buttonStack)
-                    
-                    NSLayoutConstraint.activate([
-                        buttonStack.topAnchor.constraint(equalTo: container.topAnchor),
-                        buttonStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                        buttonStack.trailingAnchor.constraint(lessThanOrEqualTo: container.trailingAnchor),
-                        buttonStack.bottomAnchor.constraint(equalTo: container.bottomAnchor)
-                    ])
-                    
-                    stack.addArrangedSubview(container)
-                    
-                    // Store buttons instead of textfield
-                    self.answerFields[id] = buttons
-                    
-                    // Submit Button
-                    let submitButton = NSButton(title: "Submit", target: self, action: #selector(self.submit))
-                    submitButton.translatesAutoresizingMaskIntoConstraints = false
-                    submitButton.bezelStyle = .rounded
-                    submitButton.contentTintColor = NSColor.controlTextColor
-                    submitButton.wantsLayer = true
-                    submitButton.widthAnchor.constraint(equalToConstant: 120).isActive = true
-                    submitButton.heightAnchor.constraint(equalToConstant: 32).isActive = true
-                    
-                    stack.addArrangedSubview(submitButton)
-                    self.submitButton = submitButton
-                    
-                    self.modalView.alphaValue = 0
-                    
-                    // Fade in after everything is ready
-                    NSAnimationContext.runAnimationGroup({ ctx in
-                        ctx.duration = 0.3
-                        self.modalView.alphaValue = 1
-                    }, completionHandler: nil)
-                    
-                    // force typing focus
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                        NSApp.activate(ignoringOtherApps: true)
-                        self.window.makeKeyAndOrderFront(nil)
-                    }
-                }
-            }
-        }.resume()
+        var state = StateManager.load()
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd"
+
+        let today = formatter.string(from: Date())
+
+        // Reset if new day
+        if state.lastSkipDate != today {
+            state.skipCountToday = 0
+        }
+
+        state.skipCountToday += 1
+        state.lastSkipDate = today
+
+        StateManager.save(state)
+
+        logger.info("SURVEY SKIPPED")
+
+        // IMPORTANT
+        skippedThisSession = true
+
+        // Hide popup only
+        window?.orderOut(nil)
+        window = nil
+
+        NSApp.hide(nil)
     }
     
     @objc func radioSelected(_ sender: NSButton) {
+
         guard let (_, buttons) = answerFields.first else { return }
-        
+
         for btn in buttons {
-            // reset all buttons
+
             btn.state = .off
-            btn.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
-            btn.contentTintColor = NSColor.labelColor
+
+            btn.wantsLayer = true
+            btn.layer?.cornerRadius = 8
+            btn.layer?.borderWidth = 1
+
             btn.layer?.borderColor = NSColor.separatorColor.cgColor
+            btn.layer?.backgroundColor = NSColor.clear.cgColor
+
+            btn.attributedTitle = NSAttributedString(
+                string: btn.title,
+                attributes: [
+                    .foregroundColor: NSColor.labelColor,
+                    .font: NSFont.systemFont(ofSize: 14)
+                ]
+            )
         }
-        
-        // apply only to selected
+
+        // Selected button
         sender.state = .on
+
         sender.layer?.backgroundColor = NSColor.systemBlue.cgColor
         sender.layer?.borderColor = NSColor.systemBlue.cgColor
-        sender.contentTintColor = .white
+
+        sender.attributedTitle = NSAttributedString(
+            string: sender.title,
+            attributes: [
+                .foregroundColor: NSColor.white,
+                .font: NSFont.systemFont(ofSize: 14, weight: .medium)
+            ]
+        )
     }
 
     @objc func submit() {
@@ -547,13 +663,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ]
         ]
         
-        guard let url = URL(string: "https://script.google.com/macros/s/AKfycbygRIt1-Z2Ppvo8GTGFx28ktI8nhHK1eFkB99cp0LQReSV86gR8YZtnMNhn6xa3dD7d/exec") else { return }
+        guard let url = URL(string: "https://script.google.com/macros/s/AKfycbxGbw1wuKIZ4cTyZMg45T5htLrvdnUQhIMdpYqbQkJilNivRrVEomDt8OUqsqRAA1j2sQ/exec") else { return }
         
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         
         request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+        
+        request.timeoutInterval = 20
         
         let task = session.dataTask(with: request) { data, response, error in
             DispatchQueue.main.async {
@@ -581,9 +699,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
                 guard http.statusCode == 200 else {
 
-                    logger.error("HTTP STATUS: \(http.statusCode)")
+                    let body = String(data: data ?? Data(), encoding: .utf8) ?? "NO RESPONSE"
 
-                    self.showAlert(message: "Server error")
+                    logger.error("HTTP STATUS: \(http.statusCode)")
+                    logger.error("BODY: \(body)")
+
+                    self.showAlert(message: "Server error (\(http.statusCode))")
+
+                    self.isSubmitting = false
+
+                    self.submitButton?.isEnabled = true
+
+                    self.submitButton?.title = "Submit"
 
                     return
                 }
@@ -613,16 +740,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         alert.addButton(withTitle: "OK")
         alert.window.level = .screenSaver
         // Attach to your window
-        alert.beginSheetModal(for: self.window, completionHandler: nil)
+        alert.beginSheetModal(for: self.window) { _ in
+
+            self.window.makeKeyAndOrderFront(nil)
+
+            NSApp.activate(ignoringOtherApps: true)
+        }
     }
 
     func actuallyCloseApp() {
         window?.orderOut(nil)
+        window.close()
         window = nil
         NSApp.hide(nil)
+        NSApp.terminate(nil)
     }
     
     @objc func screenUnlocked() {
+        skippedThisSession = false
 
         logger.info("Screen unlocked")
 
@@ -656,7 +791,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         var request = URLRequest(url: url)
 
-        request.timeoutInterval = 5
+        request.timeoutInterval = 20
 
         session.dataTask(with: request) { _, response, error in
 
@@ -670,9 +805,53 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }.resume()
     }
     
+    func fetchQuestions(completion: @escaping ([[String: Any]]) -> Void) {
+
+        let deviceSerial = getMacSerialNumber()
+
+        let urlString =
+        "https://script.google.com/macros/s/AKfycbxGbw1wuKIZ4cTyZMg45T5htLrvdnUQhIMdpYqbQkJilNivRrVEomDt8OUqsqRAA1j2sQ/exec?device_serial=\(deviceSerial)"
+
+        guard let url = URL(
+            string: urlString.addingPercentEncoding(
+                withAllowedCharacters: .urlQueryAllowed
+            )!
+        ) else {
+
+            completion([])
+            return
+        }
+
+        session.dataTask(with: url) { data, _, _ in
+
+            guard let data = data else {
+                completion([])
+                return
+            }
+
+            if let json =
+                try? JSONSerialization.jsonObject(with: data)
+                as? [[String: Any]] {
+
+                completion(json)
+
+            } else {
+
+                completion([])
+            }
+
+        }.resume()
+    }
+    
     func checkPendingSurvey() {
 
         let state = StateManager.load()
+        
+        if skippedThisSession {
+            logger.info("Already skipped in this session")
+            return
+        }
+        
         logger.info("state: \( "\(state)" )")
         let today = currentDate()
         
@@ -698,15 +877,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     return
                 }
 
-                if self.window == nil {
+                self.fetchQuestions { questions in
 
-                    self.showWindow()
+                    DispatchQueue.main.async {
 
-                } else {
+                        // NO QUESTIONS
+                        if questions.isEmpty {
 
-                    self.window.makeKeyAndOrderFront(nil)
+                            logger.info("NO PENDING QUESTIONS")
 
-                    NSApp.activate(ignoringOtherApps: true)
+                            StateManager.saveSurveyCompleted(true)
+
+                            self.window?.orderOut(nil)
+                            self.window = nil
+
+                            return
+                        }
+
+                        // QUESTIONS AVAILABLE
+                        self.questions = questions
+
+                        if self.window == nil {
+
+                            self.showWindow()
+
+                        } else {
+
+                            self.window.makeKeyAndOrderFront(nil)
+
+                            NSApp.activate(ignoringOtherApps: true)
+                        }
+                    }
                 }
             }
         }
