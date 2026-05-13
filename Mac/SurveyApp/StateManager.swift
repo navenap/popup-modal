@@ -2,6 +2,8 @@
 //  StateManager.swift
 //  SurveyApp
 //
+//  Created by Meesho on 08/05/26.
+//
 
 import Foundation
 
@@ -12,10 +14,11 @@ class StateManager {
         let defaults = UserDefaults.standard
 
         return SurveyState(
-            installDate: defaults.string(forKey: "install_date"),
             lastAnsweredDate: defaults.string(forKey: "last_answered_date"),
             answeredToday: defaults.bool(forKey: "answered_today"),
-            surveyCompleted: defaults.bool(forKey: "survey_completed")
+            surveyCompleted: defaults.bool(forKey: "survey_completed"),
+            skipCountToday: defaults.integer(forKey: "skip_count_today"),
+            lastSkipDate: defaults.string(forKey: "last_skip_date")
         )
     }
 
@@ -23,20 +26,11 @@ class StateManager {
 
         let defaults = UserDefaults.standard
 
-        defaults.set(state.installDate, forKey: "install_date")
         defaults.set(state.lastAnsweredDate, forKey: "last_answered_date")
         defaults.set(state.answeredToday, forKey: "answered_today")
         defaults.set(state.surveyCompleted, forKey: "survey_completed")
-    }
-
-    static func saveInstallDate(_ value: String) {
-
-        UserDefaults.standard.set(value, forKey: "install_date")
-    }
-
-    static func getInstallDate() -> String? {
-
-        return UserDefaults.standard.string(forKey: "install_date")
+        defaults.set(state.skipCountToday, forKey: "skip_count_today")
+        defaults.set(state.lastSkipDate, forKey: "last_skip_date")
     }
 
     static func saveLastAnsweredDate(_ value: String) {
